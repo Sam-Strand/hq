@@ -10,7 +10,7 @@ RUN go install github.com/air-verse/air@latest
 RUN git config --global --add safe.directory /hq
 
 # Кэш зависимостей
-COPY go.mod .
+COPY src/go.mod src/go.sum* ./
 RUN go mod download
 
 CMD ["sh"]
