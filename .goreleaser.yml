@@ -12,8 +12,6 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
-    dependencies:
-      - jq
 
 nfpms:
   - id: hq-pkg
@@ -28,3 +26,5 @@ nfpms:
       - rpm
       - apk
     bindir: /usr/bin
+    dependencies:
+      - jq
