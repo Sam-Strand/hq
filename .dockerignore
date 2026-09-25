@@ -1,0 +1,6 @@
+.git
+tmp
+dist
+*.deb
+*.rpm
+*.apk
