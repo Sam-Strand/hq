@@ -12,7 +12,7 @@ import (
 	"github.com/hjson/hjson-go/v4"
 )
 
-const version = "0.1.0"
+var version = "dev"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `hq — jq-like query tool for HJSON
@@ -206,7 +206,6 @@ func main() {
 	}
 
 	if compact && !rawOutput {
-		// Переупаковать в компактный JSON.
 		var v interface{}
 		if err := json.Unmarshal(out, &v); err == nil {
 			compactBytes, _ := json.Marshal(v)
