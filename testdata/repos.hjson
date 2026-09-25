@@ -1,0 +1,11 @@
+repos: {
+    foo: {
+        path: foo
+        url: https://github.com/example/foo.git
+        branch: main
+    }
+    bar: {
+        path: bar
+        url: https://github.com/example/bar.git
+    }
+}

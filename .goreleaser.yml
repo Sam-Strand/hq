@@ -1,0 +1,28 @@
+version: 2
+builds:
+  - id: hq
+    main: ./main.go
+    binary: hq
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+nfpms:
+  - id: hq-pkg
+    package_name: hq
+    vendor: Sam-Strand
+    homepage: https://github.com/Sam-Strand/hq
+    maintainer: Sam Strand <i@maxim-sadovskiy.ru>
+    description: jq-like query tool for HJSON
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
