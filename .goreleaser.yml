@@ -1,7 +1,7 @@
 version: 2
 builds:
   - id: hq
-    main: ./src
+    main: ./src/main.go
     binary: hq
     env:
       - CGO_ENABLED=0
