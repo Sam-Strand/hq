@@ -85,7 +85,9 @@ const ws = `[` + jsWSClass + `]`
 
 var needsQuotes = regexp.MustCompile(`^` + ws + `|^"|^'|^/\*|^//|^\{|^\}|^\[|^\]|^:|^,|` + ws + `$|[\x00-\x1f` + commonRange + `]`)
 var startsWithKeyword = regexp.MustCompile(`^(true|false|null|NaN|[+-]?Infinity)` + ws + `*((,|\]|\}|//|/\*)` + jsDot + `*)?$`)
-var needsEscapeName = regexp.MustCompile(`[,\{\[\}\]` + jsWSClass + `:"']|//|/\*`)
+
+// a quoteless key may contain spaces inside, but not {}[],: quotes, comment starts or line breaks
+var needsEscapeName = regexp.MustCompile(`^` + ws + `|` + ws + `$|[,{}\[\]:"'\x00-\x1f` + commonRange + `]|//|/\*`)
 var needsEscapeDQ = regexp.MustCompile(`[\\"\x00-\x1f` + commonRange + `]`)
 var needsEscapeSQ = regexp.MustCompile(`[\\'\x00-\x1f` + commonRange + `]`)
 
@@ -183,8 +185,9 @@ func (s *stringifier) quoteReplace(str string) string {
 }
 
 // breaksQuoteless — обрежет ли парсер эту строку, если записать её без кавычек?
-func breaksQuoteless(str string) bool {
+func breaksQuoteless(str string, inObject bool) bool {
 	depth := 0
+	var units []uint16
 	for i := 0; i < len(str); i++ {
 		switch str[i] {
 		case '{', '[':
@@ -196,11 +199,49 @@ func breaksQuoteless(str string) bool {
 			depth--
 		case ',':
 			if depth == 0 {
-				return true
+				if !inObject {
+					return true
+				}
+				if units == nil {
+					units = toUnits(str)
+				}
+				if isPairSeparator(units, utf16Len(str[:i])) {
+					return true
+				}
 			}
 		}
 	}
 	return depth > 0 // an unclosed bracket would swallow the rest of the line
+}
+
+// objectLiteral: would the reader take this object value (no separator commas, no stray
+// brackets) for a literal? It checks the whole text and each part before a comment start,
+// as the reader does; a ',' inside an object value is text, so "1,5" or "true, x" stay strings.
+func objectLiteral(str string) bool {
+	cands := []string{str}
+	for k := 0; k+1 < len(str); k++ {
+		if str[k] == '/' && (str[k+1] == '/' || str[k+1] == '*') {
+			cands = append(cands, str[:k])
+		}
+	}
+	for _, v := range cands {
+		t := jsTrim(v)
+		if t == "true" || t == "false" || t == "null" {
+			return true
+		}
+		if _, ok := parseSpecialNumber(t); ok {
+			return true
+		}
+		if v != "" && (v[0] == '-' || (v[0] >= '0' && v[0] <= '9')) {
+			if _, ok := tryParseNumber(v, false); ok {
+				return true
+			}
+			if d, err := parseISODate(t); err != nil || d != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func startsWithNL(str string) bool {
@@ -269,9 +310,16 @@ func (s *stringifier) quote(str string, hasComment, isRoot, noIndent bool) strin
 	if str == "" {
 		return s.wrap(s.tok["qstr"], "")
 	}
-	_, isNum := tryParseNumber(str, true)
-	if s.quoteStrings || hasComment || needsQuotes.MatchString(str) || breaksQuoteless(str) || isNum ||
-		startsWithKeyword.MatchString(str) || looksLikeISODate(str) || (isRoot && strings.Contains(str, ":")) {
+	inObject := !noIndent && !isRoot
+	var literal bool
+	if inObject {
+		literal = objectLiteral(str)
+	} else {
+		_, isNum := tryParseNumber(str, true)
+		literal = isNum || startsWithKeyword.MatchString(str) || looksLikeISODate(str)
+	}
+	if s.quoteStrings || hasComment || needsQuotes.MatchString(str) || breaksQuoteless(str, inObject) || literal ||
+		(isRoot && strings.Contains(str, ":")) {
 		if !s.needsEscape.MatchString(str) {
 			return s.wrap(s.tok["qstr"], str)
 		}
@@ -314,12 +362,28 @@ func (s *stringifier) quoteKey(name string) string {
 		return s.tok["qkey"].l + s.tok["qkey"].r
 	}
 	if s.quoteKeys || needsEscapeName.MatchString(name) {
-		if s.needsEscape.MatchString(name) {
-			return s.wrap(s.tok["qkey"], s.quoteReplace(name))
+		if !s.needsEscape.MatchString(name) {
+			return s.wrap(s.tok["qkey"], name)
 		}
-		return s.wrap(s.tok["qkey"], name)
+		// a key with line breaks is written as a ''' block (same rules as a value)
+		if s.multiline != 0 && strings.Contains(name, "\n") && !s.needsEscML.MatchString(name) {
+			return s.mlKey(name)
+		}
+		return s.wrap(s.tok["qkey"], s.quoteReplace(name))
 	}
 	return s.wrap(s.tok["key"], name)
+}
+
+// mlKey: opening and closing ”' at the key column, the reader strips exactly gap.
+func (s *stringifier) mlKey(name string) string {
+	res := s.tok["mstr"].l
+	for _, line := range strings.Split(name, "\n") {
+		res += s.o.EOL
+		if line != "" {
+			res += s.gap + line
+		}
+	}
+	return res + s.o.EOL + s.gap + s.tok["mstr"].r
 }
 
 // ---------------------------------------------------------------- dispatch
@@ -605,6 +669,9 @@ func (s *stringifier) strObject(o *Object, com *Comments, noIndent bool) string 
 		s.wrapLen = 0
 		v := o.values[k]
 		qk := s.quoteKey(k) + s.tok["col"].l
+		if c.condense && strings.Contains(qk, "\n") {
+			c.cdisabled = true
+		}
 		vs := s.str(v, com != nil && ca, false, false)
 		sp := " "
 		if startsWithNL(vs) {

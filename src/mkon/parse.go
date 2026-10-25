@@ -248,36 +248,137 @@ func (p *parser) mlString() string {
 	return fromUnits(out)
 }
 
+// value contexts for quoteless strings
+const (
+	notInContainer = iota
+	inArray
+	inObject
+)
+
+// keyname reads a key: a quoted string ("…", '…' or ”'…”') or quoteless text up to ':'.
+// A quoteless key may contain spaces; it cannot contain {}[],: or a line break.
 func (p *parser) keyname() string {
 	if p.ch == '"' || p.ch == '\'' {
-		return p.string(false)
+		return p.string(true)
+	}
+	start, end := p.at-1, p.at-1
+	for end >= 0 && end < p.n && !isKeyStop(p.t[end]) {
+		end++
+	}
+	if end > start {
+		p.jump(end)
+	}
+	k := end
+	for k > start && p.t[k-1] <= ' ' { // whitespace before ':' is not part of the key
+		k--
 	}
 	var name []uint16
-	start, space := p.at, -1
-	for {
-		ch := p.ch
-		switch {
-		case ch == ':':
-			if len(name) == 0 {
-				p.fail("Found ':' but no key name (for an empty key name use quotes)")
-			} else if space >= 0 && space != len(name) {
-				p.at = start + space
-				p.fail("Found whitespace in your key name (use quotes to include)")
-			}
-			return fromUnits(name)
-		case ch <= ' ': // включая eof (-1)
-			if ch == eof {
-				p.fail("Found EOF while looking for a key name (check your syntax)")
-			} else if space < 0 {
-				space = len(name)
-			}
-		case isPunctuator(ch):
-			p.fail("Found '" + chStr(ch) + "' where a key name was expected (check your syntax or use quotes if the key name includes {}[],: or whitespace)")
-		default:
-			name = append(name, uint16(ch))
-		}
-		p.next()
+	if start >= 0 && k > start {
+		name = p.t[start:k]
 	}
+
+	switch ch := p.ch; {
+	case ch == ':':
+		if len(name) == 0 {
+			p.fail("Found ':' but no key name (for an empty key name use quotes)")
+		}
+		return fromUnits(name)
+	case ch == eof:
+		p.fail("Found EOF while looking for a key name (check your syntax)")
+	case ch == '\n' || ch == '\r':
+		// the ':' may follow on a later line: "key\n  : value"
+		lb := p.at
+		for p.ch != eof && p.ch <= ' ' {
+			p.next()
+		}
+		if p.ch == ':' && len(name) > 0 {
+			return fromUnits(name)
+		}
+		p.at = lb
+		p.fail("Found a line break while looking for ':' after the key name (check your syntax)")
+	default:
+		p.fail("Found '" + chStr(ch) + "' where a key name was expected (check your syntax or use quotes if the key name includes {}[],: or a line break)")
+	}
+	return ""
+}
+
+func isKeyStop(c uint16) bool {
+	switch c {
+	case '\n', '\r', '{', '}', '[', ']', ',', ':':
+		return true
+	}
+	return false
+}
+
+// isPairSeparator: does the ',' at t[i] inside a quoteless object value separate pairs?
+// Only when a key and ':' follow it on the same line, or nothing but a comment does:
+//
+//	a: P пара, кг/см2      -> "P пара, кг/см2"
+//	a: x, y, b: 1          -> a = "x, y", b = 1
+//	a: x,  // comment      -> a = "x"
+//
+// Used by the parser and by stringify (to decide when an object value needs quotes).
+func isPairSeparator(t []uint16, i int) bool {
+	n, j := len(t), i+1
+	for j < n && t[j] <= ' ' && t[j] != '\n' && t[j] != '\r' {
+		j++
+	}
+	if j >= n {
+		return true
+	}
+	switch c := t[j]; {
+	case c == '\n' || c == '\r' || c == '}' || c == ']':
+		return true
+	case c == '/' && j+1 < n && (t[j+1] == '/' || t[j+1] == '*'):
+		return true
+	case c == '"' || c == '\'':
+		return quotedKeyFollows(t, j)
+	}
+	for ; j < n; j++ {
+		switch t[j] {
+		case ':':
+			return true
+		case ',', '{', '}', '[', ']', '\n', '\r':
+			return false
+		}
+	}
+	return false
+}
+
+// quotedKeyFollows: t[j] is a quote — is it a quoted key followed by ':'?
+func quotedKeyFollows(t []uint16, j int) bool {
+	q, n := t[j], len(t)
+	if q == '\'' && j+2 < n && t[j+1] == '\'' && t[j+2] == '\'' {
+		e := -1
+		for k := j + 3; k+2 < n; k++ {
+			if t[k] == '\'' && t[k+1] == '\'' && t[k+2] == '\'' {
+				e = k
+				break
+			}
+		}
+		if e < 0 {
+			return false
+		}
+		j = e + 3
+	} else {
+		for j++; ; j++ {
+			if j >= n || t[j] == '\n' || t[j] == '\r' {
+				return false
+			}
+			if t[j] == '\\' {
+				j++
+				continue
+			}
+			if t[j] == q {
+				j++
+				break
+			}
+		}
+	}
+	for j < n && t[j] <= ' ' && t[j] != '\n' {
+		j++
+	}
+	return j < n && t[j] == ':'
 }
 
 func (p *parser) white() {
@@ -307,7 +408,7 @@ func (p *parser) white() {
 }
 
 // tfnns — quoteless-строка, число, NaN/±Infinity, дата, true/false/null.
-func (p *parser) tfnns(inContainer bool) any {
+func (p *parser) tfnns(inContainer int) any {
 	if isPunctuator(p.ch) {
 		p.fail("Found a punctuator character '" + chStr(p.ch) + "' when expecting a quoteless string (check your syntax)")
 	}
@@ -317,8 +418,9 @@ func (p *parser) tfnns(inContainer bool) any {
 		p.next()
 		ch := p.ch
 		isEOL := ch == '\r' || ch == '\n' || ch == eof
-		isSep := ch == ',' || ch == '}' || ch == ']'
-		endsString := isEOL || (inContainer && isSep && depth == 0)
+		isSep := ch == '}' || ch == ']' ||
+			ch == ',' && (inContainer != inObject || depth > 0 || isPairSeparator(p.t, p.at-1))
+		endsString := isEOL || (inContainer != notInContainer && isSep && depth == 0)
 		if endsString || isSep || (ch == '/' && (p.peek(0) == '/' || p.peek(0) == '*')) {
 			v := p.slice(start, p.at-1)
 			chf := byte(0)
@@ -493,7 +595,7 @@ func (p *parser) array() *Array {
 		return arr
 	}
 	for p.ch != eof {
-		arr.Items = append(arr.Items, p.value(true))
+		arr.Items = append(arr.Items, p.value(inArray))
 		cAt = p.at
 		p.white()
 		// the comma is optional and trailing commas are allowed
@@ -574,7 +676,7 @@ func (p *parser) object(withoutBraces bool) *Object {
 		}
 		p.next()
 		// duplicate keys overwrite the previous value (and keep its position)
-		obj.Set(key, p.value(true))
+		obj.Set(key, p.value(inObject))
 		cAt = p.at
 		p.white()
 		if p.ch == ',' {
@@ -608,7 +710,7 @@ func (p *parser) object(withoutBraces bool) *Object {
 	return nil
 }
 
-func (p *parser) value(inContainer bool) any {
+func (p *parser) value(inContainer int) any {
 	p.white()
 	switch p.ch {
 	case '{':
@@ -704,7 +806,7 @@ func (p *parser) rootValue() any {
 	// and would otherwise be read as a braceless object.
 	if p.isRootDateTime() {
 		if v, ok := p.try(func() any {
-			d := p.value(false)
+			d := p.value(notInContainer)
 			if dd, isDate := d.(*Date); isDate {
 				return p.checkTrailing(dd, c)
 			}
@@ -719,5 +821,5 @@ func (p *parser) rootValue() any {
 		return v
 	}
 	p.at, p.ch = at, ch
-	return p.checkTrailing(p.value(false), c)
+	return p.checkTrailing(p.value(notInContainer), c)
 }
