@@ -20,7 +20,7 @@ nfpms:
     vendor: Sam-Strand
     homepage: https://github.com/Sam-Strand/hq
     maintainer: Sam Strand <i@maxim-sadovskiy.ru>
-    description: jq-like query tool for HJSON
+    description: jq-like query tool for mkon configs
     license: MIT
     formats:
       - deb

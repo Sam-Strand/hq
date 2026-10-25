@@ -1,29 +1,30 @@
 package main
 
 import (
-    "bytes"
-    "encoding/json"
-    "fmt"
-    "io"
-    "os"
-    "os/exec"
-    "strings"
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"os/exec"
+	"strings"
 
-    "github.com/hjson/hjson-go/v4"
+	"github.com/Sam-Strand/hq/mkon"
 )
 
 var version = "dev"
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `hq — jq-like query tool for HJSON
+	fmt.Fprintf(os.Stderr, `hq — jq-like query tool for mkon
 
 Usage:
     hq [options] <jq-filter> [file]
-    cat file.hjson | hq [options] <jq-filter>
+    cat file.mkon | hq [options] <jq-filter>
 
 Options:
     -r, --raw-output    raw string output (no JSON quotes)
-    -i, --in-place      write result back as HJSON (requires file)
+    -i, --in-place      write result back as mkon, keeping comments (requires file)
     -c, --compact       compact JSON output
     -e, --exit-status   exit 1 if last output was null/false
     -s, --slurp         read entire input into an array
@@ -34,262 +35,309 @@ Options:
     -h, --help          show this help
     -V, --version       show version
 
+JSON has no dates or NaN/Infinity, so jq sees them as strings:
+    2024-01-15, 2024-01-15T10:30:00Z  ->  "2024-01-15", "2024-01-15T10:30:00Z"
+    NaN, Infinity, -Infinity          ->  "NaN", "Infinity", "-Infinity"
+With -i they become dates/numbers again where the original file had them.
+
 Examples:
-    hq '.repos | keys[]' repos.hjson
-    hq -r '.repos.foo.url' repos.hjson
-    hq -r --arg k foo '.repos[$k].url' repos.hjson
-    hq -i '.repos.foo.branch = "dev"' repos.hjson
+    hq '.repos | keys[]' repos.mkon
+    hq -r '.repos.foo.url' repos.mkon
+    hq -r --arg k foo '.repos[$k].url' repos.mkon
+    hq -i '.repos.foo.branch = "dev"' repos.mkon
 `)
 }
 
 type jqOpts struct {
-    raw      bool
-    exitStat bool
-    slurp    bool
-    compact  bool
-    inPlace  bool
-    // накопленные пары для jq: ("--arg", "k", "v", ...)
-    jqArgs   []string
-    filter   string
-    file     string
-    jsonArgs []string // значения для --args / --jsonargs
-    mode     string   // "", "args", "jsonargs"
+	raw      bool
+	exitStat bool
+	slurp    bool
+	compact  bool
+	inPlace  bool
+	jqArgs   []string // накопленные аргументы для jq: ("--arg", "k", "v", ...)
+	filter   string
+	file     string
+	jsonArgs []string // значения для --args / --jsonargs
+	mode     string   // "", "args", "jsonargs"
 }
 
 func parseArgs(argv []string) (*jqOpts, error) {
-    o := &jqOpts{}
-    i := 0
-    endOpts := false
+	o := &jqOpts{}
+	i := 0
+	endOpts := false
 
-    need := func(n int, what string) error {
-        if i+n >= len(argv) {
-            return fmt.Errorf("option %s requires %d argument(s)", argv[i], n)
-        }
-        return nil
-    }
+	need := func(n int) error {
+		if i+n >= len(argv) {
+			return fmt.Errorf("option %s requires %d argument(s)", argv[i], n)
+		}
+		return nil
+	}
 
-    for i < len(argv) {
-        a := argv[i]
-        if endOpts || !strings.HasPrefix(a, "-") || a == "-" {
-            switch {
-            case o.mode != "":
-                // после --args / --jsonargs всё позиционное — это значения
-                o.jsonArgs = append(o.jsonArgs, a)
-            case o.filter == "":
-                o.filter = a
-            case o.file == "":
-                o.file = a
-            default:
-                return nil, fmt.Errorf("too many arguments")
-            }
-            i++
-            continue
-        }
+	for i < len(argv) {
+		a := argv[i]
+		if endOpts || !strings.HasPrefix(a, "-") || a == "-" {
+			switch {
+			case o.filter == "":
+				o.filter = a
+			case o.mode != "":
+				// после --args / --jsonargs всё позиционное — это значения
+				o.jsonArgs = append(o.jsonArgs, a)
+			case o.file == "":
+				o.file = a
+			default:
+				return nil, fmt.Errorf("too many arguments")
+			}
+			i++
+			continue
+		}
 
-        switch a {
-        case "--":
-            endOpts = true
-            i++
-        case "-h", "--help":
-            usage()
-            os.Exit(0)
-        case "-V", "--version":
-            fmt.Println("hq", version)
-            os.Exit(0)
-        case "-r", "--raw-output":
-            o.raw = true
-            o.jqArgs = append(o.jqArgs, "-r")
-            i++
-        case "-e", "--exit-status":
-            o.exitStat = true
-            o.jqArgs = append(o.jqArgs, "-e")
-            i++
-        case "-s", "--slurp":
-            o.slurp = true
-            o.jqArgs = append(o.jqArgs, "-s")
-            i++
-        case "-c", "--compact":
-            o.compact = true
-            i++
-        case "-i", "--in-place":
-            o.inPlace = true
-            i++
-        case "--arg", "--argjson":
-            if err := need(2, a); err != nil {
-                return nil, err
-            }
-            o.jqArgs = append(o.jqArgs, a, argv[i+1], argv[i+2])
-            i += 3
-        case "--args":
-            o.mode = "args"
-            o.jqArgs = append(o.jqArgs, "--args")
-            i++
-        case "--jsonargs":
-            o.mode = "jsonargs"
-            o.jqArgs = append(o.jqArgs, "--jsonargs")
-            i++
-        default:
-            return nil, fmt.Errorf("unknown option: %s", a)
-        }
-    }
+		switch a {
+		case "--":
+			endOpts = true
+			i++
+		case "-h", "--help":
+			usage()
+			os.Exit(0)
+		case "-V", "--version":
+			fmt.Println("hq", version)
+			os.Exit(0)
+		case "-r", "--raw-output":
+			o.raw = true
+			o.jqArgs = append(o.jqArgs, "-r")
+			i++
+		case "-e", "--exit-status":
+			o.exitStat = true
+			o.jqArgs = append(o.jqArgs, "-e")
+			i++
+		case "-s", "--slurp":
+			o.slurp = true
+			o.jqArgs = append(o.jqArgs, "-s")
+			i++
+		case "-c", "--compact":
+			o.compact = true
+			o.jqArgs = append(o.jqArgs, "-c")
+			i++
+		case "-i", "--in-place":
+			o.inPlace = true
+			i++
+		case "--arg", "--argjson":
+			if err := need(2); err != nil {
+				return nil, err
+			}
+			o.jqArgs = append(o.jqArgs, a, argv[i+1], argv[i+2])
+			i += 3
+		case "--args":
+			o.mode = "args"
+			i++
+		case "--jsonargs":
+			o.mode = "jsonargs"
+			i++
+		default:
+			return nil, fmt.Errorf("unknown option: %s", a)
+		}
+	}
 
-    // позиционные аргументы после --args/--jsonargs уже собраны; иначе — сюда
-    if o.mode != "" && o.filter == "" {
-        return nil, fmt.Errorf("--args/--jsonargs requires a filter")
-    }
-
-    if o.filter == "" {
-        return nil, fmt.Errorf("filter is required")
-    }
-    return o, nil
-}
-
-func checkJQ() error {
-    _, err := exec.LookPath("jq")
-    if err != nil {
-        return fmt.Errorf("jq not found in PATH. Install it: sudo apt install jq")
-    }
-    return nil
-}
-
-// loadHJSON читает HJSON из reader и возвращает интерфейс.
-func loadHJSON(r io.Reader) (interface{}, error) {
-    data, err := io.ReadAll(r)
-    if err != nil {
-        return nil, fmt.Errorf("read input: %w", err)
-    }
-    var v interface{}
-    if err := hjson.Unmarshal(data, &v); err != nil {
-        return nil, fmt.Errorf("parse HJSON: %w", err)
-    }
-    return v, nil
+	if o.filter == "" {
+		return nil, fmt.Errorf("filter is required")
+	}
+	if o.inPlace {
+		switch {
+		case o.file == "" || o.file == "-":
+			return nil, fmt.Errorf("--in-place requires a file argument")
+		case o.raw:
+			return nil, fmt.Errorf("--in-place cannot be combined with --raw-output")
+		case o.mode != "":
+			return nil, fmt.Errorf("--in-place cannot be combined with --args/--jsonargs (the file would be ambiguous)")
+		}
+	}
+	return o, nil
 }
 
 // runJQ прогоняет JSON через jq и возвращает stdout.
 func runJQ(o *jqOpts, jsonInput []byte) ([]byte, bool, error) {
-    args := append([]string{}, o.jqArgs...)
-    args = append(args, o.filter)
-    if len(o.jsonArgs) > 0 {
-        args = append(args, o.jsonArgs...)
-    }
+	args := append([]string{}, o.jqArgs...)
+	args = append(args, o.filter)
+	if o.mode != "" {
+		// --args/--jsonargs идут после фильтра, иначе jq сочтёт значения файлами
+		args = append(args, "--"+o.mode)
+		args = append(args, o.jsonArgs...)
+	}
 
-    cmd := exec.Command("jq", args...)
-    cmd.Stdin = bytes.NewReader(jsonInput)
+	cmd := exec.Command("jq", args...)
+	cmd.Stdin = bytes.NewReader(jsonInput)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
-    var stdout, stderr bytes.Buffer
-    cmd.Stdout = &stdout
-    cmd.Stderr = &stderr
-
-    err := cmd.Run()
-    // jq -e: код 1 значит "result was null/false, no error"
-    exit1 := false
-    if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 && o.exitStat {
-        exit1 = true
-        err = nil
-    }
-    if err != nil {
-        msg := strings.TrimSpace(stderr.String())
-        if msg == "" {
-            msg = err.Error()
-        }
-        return nil, false, fmt.Errorf("jq: %s", msg)
-    }
-    return stdout.Bytes(), exit1, nil
+	err := cmd.Run()
+	// jq -e: код 1 значит "result was null/false, no error"
+	exit1 := false
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 && o.exitStat {
+		exit1, err = true, nil
+	}
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, false, fmt.Errorf("jq: %s", msg)
+	}
+	return stdout.Bytes(), exit1, nil
 }
 
-// dumpHJSON сериализует объект в HJSON.
-func dumpHJSON(v interface{}) ([]byte, error) {
-    opts := hjson.DefaultOptions()
-    opts.IndentBy = "  "
-    return hjson.MarshalWithOptions(v, opts)
+// restore возвращает типы mkon, которых нет в JSON, и комментарии исходного файла:
+// строка на месте даты снова становится датой (если это корректная ISO-дата),
+// "NaN"/"Infinity"/"-Infinity" на месте числа — числом; комментарии переносятся по ключам и индексам.
+func restore(orig, v any) any {
+	switch x := v.(type) {
+	case string:
+		switch o := orig.(type) {
+		case *mkon.Date:
+			if s, err := mkon.FormatDate(o); err == nil && s == x {
+				return o // без изменений — вместе с комментариями
+			}
+			if d, err := mkon.Parse(x); err == nil {
+				if _, ok := d.(*mkon.Date); ok {
+					return d
+				}
+			}
+		case float64:
+			switch x {
+			case "NaN":
+				return math.NaN()
+			case "Infinity":
+				return math.Inf(1)
+			case "-Infinity":
+				return math.Inf(-1)
+			}
+		}
+	case *mkon.Object:
+		if o, ok := orig.(*mkon.Object); ok {
+			x.Comments = o.Comments // ключи, которых больше нет, пропускаются при записи
+			for _, k := range x.Keys() {
+				if ov, ok := o.Get(k); ok {
+					nv, _ := x.Get(k)
+					x.Set(k, restore(ov, nv))
+				}
+			}
+		}
+	case *mkon.Array:
+		if o, ok := orig.(*mkon.Array); ok {
+			x.Comments = o.Comments
+			for i := range x.Items {
+				if i < len(o.Items) {
+					x.Items[i] = restore(o.Items[i], x.Items[i])
+				}
+			}
+		}
+	}
+	return v
+}
+
+// startsWithBrace — начинается ли текст (после пробелов и комментариев) с '{'.
+func startsWithBrace(s string) bool {
+	for {
+		s = strings.TrimLeft(s, " \t\r\n\ufeff")
+		switch {
+		case strings.HasPrefix(s, "//"):
+			if i := strings.IndexByte(s, '\n'); i >= 0 {
+				s = s[i:]
+			} else {
+				return false
+			}
+		case strings.HasPrefix(s, "/*"):
+			if i := strings.Index(s[2:], "*/"); i >= 0 {
+				s = s[i+4:]
+			} else {
+				return false
+			}
+		default:
+			return strings.HasPrefix(s, "{")
+		}
+	}
+}
+
+func fail(code int, format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "hq: "+format+"\n", a...)
+	os.Exit(code)
 }
 
 func main() {
-    o, err := parseArgs(os.Args[1:])
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "hq: %v\n", err)
-        usage()
-        os.Exit(2)
-    }
+	o, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hq: %v\n", err)
+		usage()
+		os.Exit(2)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		fail(2, "jq not found in PATH. Install it: sudo apt install jq")
+	}
 
-    if err := checkJQ(); err != nil {
-        fmt.Fprintf(os.Stderr, "hq: %v\n", err)
-        os.Exit(2)
-    }
+	// 1. Источник: файл или stdin
+	var data []byte
+	if o.file != "" && o.file != "-" {
+		data, err = os.ReadFile(o.file)
+	} else {
+		data, err = io.ReadAll(os.Stdin)
+	}
+	if err != nil {
+		fail(1, "read input: %v", err)
+	}
 
-    // Источник: файл или stdin.
-    var (
-        input io.Reader
-        path  string
-    )
-    if o.file != "" {
-        f, err := os.Open(o.file)
-        if err != nil {
-            fmt.Fprintf(os.Stderr, "hq: %v\n", err)
-            os.Exit(1)
-        }
-        defer f.Close()
-        input = f
-        path = o.file
-    } else {
-        input = os.Stdin
-    }
+	// 2. mkon -> модель (с комментариями, если файл будет перезаписан)
+	doc, err := mkon.ParseWith(string(data), mkon.ParseOptions{KeepComments: o.inPlace})
+	if err != nil {
+		fail(1, "parse mkon: %v", err)
+	}
 
-    // 1. HJSON -> interface{}
-    obj, err := loadHJSON(input)
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "hq: %v\n", err)
-        os.Exit(1)
-    }
+	// 3. -> JSON -> jq
+	jsonBytes, err := mkon.ToJSON(doc, "")
+	if err != nil {
+		fail(1, "encode to JSON: %v", err)
+	}
+	out, exit1, err := runJQ(o, jsonBytes)
+	if err != nil {
+		fail(1, "%v", err)
+	}
 
-    // 2. -> JSON для jq
-    jsonBytes, err := json.Marshal(obj)
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "hq: encode to JSON: %v\n", err)
-        os.Exit(1)
-    }
+	if !o.inPlace {
+		os.Stdout.Write(out)
+		if exit1 {
+			os.Exit(1)
+		}
+		return
+	}
 
-    // 3. jq
-    out, exit1, err := runJQ(o, jsonBytes)
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "hq: %v\n", err)
-        os.Exit(1)
-    }
-    if exit1 {
-        os.Exit(1)
-    }
-
-    // 4. Вывод
-    if o.inPlace {
-        if path == "" {
-            fmt.Fprintln(os.Stderr, "hq: --in-place requires a file argument")
-            os.Exit(1)
-        }
-        var result interface{}
-        if err := json.Unmarshal(out, &result); err != nil {
-            fmt.Fprintf(os.Stderr, "hq: cannot write in-place, jq output is not JSON: %v\n", err)
-            os.Exit(1)
-        }
-        hjsonBytes, err := dumpHJSON(result)
-        if err != nil {
-            fmt.Fprintf(os.Stderr, "hq: encode HJSON: %v\n", err)
-            os.Exit(1)
-        }
-        if err := os.WriteFile(path, hjsonBytes, 0644); err != nil {
-            fmt.Fprintf(os.Stderr, "hq: write %s: %v\n", path, err)
-            os.Exit(1)
-        }
-        return
-    }
-
-    if o.compact && !o.raw {
-        var v interface{}
-        if err := json.Unmarshal(out, &v); err == nil {
-            compactBytes, _ := json.Marshal(v)
-            os.Stdout.Write(compactBytes)
-            os.Stdout.Write([]byte("\n"))
-            return
-        }
-    }
-    os.Stdout.Write(out)
+	// 4. -i: результат jq -> mkon с типами и комментариями исходного файла
+	results, err := mkon.FromJSONStream(out)
+	if err != nil {
+		fail(1, "cannot write in-place, jq output is not JSON: %v", err)
+	}
+	if len(results) != 1 {
+		fail(1, "cannot write in-place, jq produced %d results (need exactly 1)", len(results))
+	}
+	opts := mkon.DefaultOptions()
+	opts.KeepComments = true
+	opts.BracesSameLine = true // как раньше у hq (hjson-go)
+	if _, isObj := doc.(*mkon.Object); isObj && !startsWithBrace(string(data)) {
+		opts.RootBraces = false // файл был без корневых скобок — так и оставляем
+	}
+	if bytes.Contains(data, []byte("\r\n")) {
+		opts.EOL = "\r\n"
+	}
+	text, err := mkon.StringifyWith(restore(doc, results[0]), opts)
+	if err != nil {
+		fail(1, "encode mkon: %v", err)
+	}
+	mode := os.FileMode(0o644)
+	if st, err := os.Stat(o.file); err == nil {
+		mode = st.Mode().Perm()
+	}
+	if err := os.WriteFile(o.file, []byte(text), mode); err != nil {
+		fail(1, "write %s: %v", o.file, err)
+	}
+	if exit1 {
+		os.Exit(1)
+	}
 }
