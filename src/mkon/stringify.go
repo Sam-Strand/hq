@@ -293,10 +293,11 @@ func (s *stringifier) mlString(str, gap string, sameLine, shallow bool) string {
 	if len(a) == 1 && !strings.HasPrefix(a[0], "'") && !strings.HasSuffix(a[0], "'") && a[0] != "" && a[0][0] > ' ' {
 		return s.wrap(s.tok["mstr"], a[0])
 	}
-	// The reader takes the block indent from the column of the opening '''.
-	// For an object value (not shallow) that column must equal gap, so ''' goes on its own line.
+	// The reader strips the smallest indent of the lines and of the closing ''' (written
+	// at gap), so the opening ''' may stay after the key with BracesSameLine.
+	keepOnLine := sameLine
 	res := s.tok["mstr"].l
-	if !(sameLine && shallow) {
+	if !keepOnLine {
 		res = s.o.EOL + gap + res
 	}
 	for _, line := range a {
@@ -603,6 +604,7 @@ func (s *stringifier) strObject(o *Object, com *Comments, noIndent bool) string 
 
 		s.wrapLen = 0
 		v := o.values[k]
+		qk := s.quoteKey(k) + s.tok["col"].l
 		vs := s.str(v, com != nil && ca, false, false)
 		sp := " "
 		if startsWithNL(vs) {
@@ -612,7 +614,7 @@ func (s *stringifier) strObject(o *Object, com *Comments, noIndent bool) string 
 		if setsep {
 			sep = s.separator
 		}
-		c.partial = append(c.partial, s.quoteKey(k)+s.tok["col"].l+sp+vs+sep)
+		c.partial = append(c.partial, qk+sp+vs+sep)
 
 		if ac := s.afterComment(cm, ca, s.gap); ac != "" {
 			c.partial = append(c.partial, ac)

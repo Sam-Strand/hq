@@ -67,6 +67,12 @@ func (p *parser) next() int {
 	return p.ch
 }
 
+// jump moves to the character at pos (same as calling next() until we get there).
+func (p *parser) jump(pos int) {
+	p.at = pos
+	p.next()
+}
+
 func (p *parser) peek(offs int) int { return p.charAt(p.at + offs) }
 
 func (p *parser) slice(a, b int) string {
@@ -165,68 +171,81 @@ func (p *parser) string(allowML bool) string {
 }
 
 func (p *parser) mlString() string {
-	var s []uint16
-	triple := 0
-
-	// we are at ''' +1 - get indent
-	indent := 0
-	for {
-		c := p.peek(-indent - 5)
-		if c == eof || c == '\n' {
+	// We are just past the opening '''. The common indent is the smallest indent among the
+	// non-blank lines and the line of the closing ''' (when only whitespace precedes it).
+	// The column of the opening ''' does not matter. \r is dropped (CRLF files).
+	start, end := p.at-1, -1
+	for i := start; i+2 < p.n; i++ {
+		if p.t[i] == '\'' && p.t[i+1] == '\'' && p.t[i+2] == '\'' {
+			end = i
 			break
 		}
-		indent++
 	}
-	skipIndent := func() {
-		skip := indent
-		for p.ch != eof && p.ch <= ' ' && p.ch != '\n' {
-			if skip <= 0 {
-				break
-			}
-			skip--
-			p.next()
-		}
+	if end < 0 {
+		p.jump(p.n)
+		p.fail("Bad multiline string")
 	}
+	p.jump(end + 3)
 
-	// skip white/to (newline)
-	for p.ch != eof && p.ch <= ' ' && p.ch != '\n' {
-		p.next()
+	isWS := func(c uint16) bool { return c <= ' ' && c != '\n' }
+	lead := func(l []uint16) int {
+		i := 0
+		for i < len(l) && isWS(l[i]) {
+			i++
+		}
+		return i
 	}
-	if p.ch == '\n' {
-		p.next()
-		skipIndent()
+	// split into lines, dropping \r
+	var lines [][]uint16
+	cur := []uint16{}
+	for _, c := range p.t[start:end] {
+		switch c {
+		case '\r':
+		case '\n':
+			lines, cur = append(lines, cur), []uint16{}
+		default:
+			cur = append(cur, c)
+		}
 	}
+	lines = append(lines, cur)
 
-	for {
-		if p.ch == eof {
-			p.fail("Bad multiline string")
-		} else if p.ch == '\'' {
-			triple++
-			p.next()
-			if triple == 3 {
-				if len(s) > 0 && s[len(s)-1] == '\n' {
-					s = s[:len(s)-1] // remove last EOL
-				}
-				return fromUnits(s)
-			}
-			continue
-		} else {
-			for triple > 0 {
-				s = append(s, '\'')
-				triple--
-			}
-		}
-		if p.ch == '\n' {
-			s = append(s, '\n')
-			p.next()
-			skipIndent()
-		} else {
-			if p.ch != '\r' {
-				s = append(s, uint16(p.ch))
-			}
-			p.next()
+	// text right after the opening ''' (one-line form or a first line)
+	first := lines[0][lead(lines[0]):]
+	if len(lines) == 1 {
+		return fromUnits(first)
+	}
+	lines = lines[1:]
+	last := lines[len(lines)-1]
+	closingAlone := lead(last) == len(last)
+	base := -1
+	if closingAlone {
+		base = len(last)
+	}
+	for _, l := range lines {
+		if n := lead(l); n < len(l) && (base < 0 || n < base) {
+			base = n
 		}
 	}
+	if base < 0 {
+		base = 0
+	}
+	if closingAlone {
+		lines = lines[:len(lines)-1]
+	}
+	var out []uint16
+	if len(first) > 0 {
+		out = append(out, first...)
+		if len(lines) > 0 {
+			out = append(out, '\n')
+		}
+	}
+	for i, l := range lines {
+		if i > 0 {
+			out = append(out, '\n')
+		}
+		out = append(out, l[min(base, lead(l)):]...)
+	}
+	return fromUnits(out)
 }
 
 func (p *parser) keyname() string {

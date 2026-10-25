@@ -408,7 +408,7 @@ func runJS(t *testing.T, reqs []bridgeReq) []bridgeRes {
 }
 
 var crossOptionSets = []map[string]any{
-	{}, {"quotes": "all"}, {"quotes": "keys"}, {"separator": true}, {"condense": 60.0}, {"bracesSameLine": true},
+	{}, {"quotes": "all"}, {"quotes": "keys"}, {"separator": true}, {"condense": 60.0}, {"bracesSameLine": true}, {"bracesSameLine": true, "space": 4.0}, {"bracesSameLine": true, "space": "\t"},
 	{"emitRootBraces": false}, {"multiline": "off"}, {"multiline": "no-tabs"}, {"sortProps": true},
 	{"space": "\t"}, {"quoteChar": "'"},
 }
