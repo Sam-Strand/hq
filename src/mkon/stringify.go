@@ -155,7 +155,7 @@ func newStringifier(o Options) (*stringifier, error) {
 	} else {
 		s.needsEscML = needsEscapeMLStd
 	}
-	s.quoteStrings = o.Quotes == "all" || o.Quotes == "strings" || o.Separator
+	s.quoteStrings = o.Quotes == "all" || o.Quotes == "strings"
 	s.quoteKeys = o.Quotes == "all" || o.Quotes == "keys"
 	if s.quoteStrings {
 		multiline = 0
@@ -433,7 +433,6 @@ type ctx struct {
 	mind, eolMind, prefix string
 	partial, cpartial     []string
 	condense, cdisabled   bool
-	saveQuote, saveML     bool
 	saveMLMode            int
 	iseparator            string
 	cwrapLen              int
@@ -447,7 +446,6 @@ func (s *stringifier) open(noIndent bool) *ctx {
 		c.prefix = c.eolMind
 	}
 	c.condense = s.o.Condense != 0
-	c.saveQuote = s.quoteStrings
 	c.saveMLMode = s.multiline
 	if s.o.Separator {
 		c.iseparator = ""
@@ -459,9 +457,8 @@ func (s *stringifier) open(noIndent bool) *ctx {
 
 func (s *stringifier) condensedString(v string, c *ctx, noIndent bool) string {
 	s.wrapLen = 0
-	s.quoteStrings = true
-	s.multiline = 0
-	defer func() { s.quoteStrings, s.multiline = c.saveQuote, c.saveMLMode }()
+	s.multiline = 0 // ''' не помещается в строку; кавычки — по обычным правилам
+	defer func() { s.multiline = c.saveMLMode }()
 	return s.str(v, false, noIndent, false)
 }
 
